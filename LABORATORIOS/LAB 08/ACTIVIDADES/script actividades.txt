@@ -1,0 +1,3 @@
+#ACTIVIDAD 01
+ls *.txt | wc -l
+ls | grep "reporte" | wc -
