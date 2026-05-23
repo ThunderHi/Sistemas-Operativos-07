@@ -17,6 +17,12 @@ lock = threading.Lock()      # Lock global para evitar escrituras simultáneas e
 USUARIO = "Thunder"
 HOST = "UBUNTUSON4"
 
+# ── Límites y caracteres inválidos ────────
+MAX_NOMBRE = 50          # Máximo de caracteres permitidos en un nombre.
+# Caracteres prohibidos: separador de campo | y separadores de ruta / \
+# También bloqueamos caracteres de control y otros problemáticos.
+CHARS_INVALIDOS = set('|/\\:*?"<>\t\n\r')
+
 # Códigos ANSI para dar apariencia similar a una terminal de Ubuntu.
 RESET = "\033[0m"
 VERDE = "\033[92m"
@@ -74,6 +80,13 @@ def deserializar_registro(linea: str) -> Optional[Dict[str, str]]:
     partes = linea.strip().split("|")
 
     if len(partes) != 6:
+        return None
+
+    # Validar que id y padre sean enteros válidos.
+    try:
+        int(partes[0])
+        int(partes[3])
+    except ValueError:
         return None
 
     return {
@@ -221,6 +234,24 @@ def validar_permisos(permisos: str) -> bool:
     )
 
 
+def validar_nombre(nombre: str) -> Optional[str]:
+    """
+    Valida que un nombre de archivo o directorio sea seguro y usable.
+    Devuelve None si es válido, o un mensaje de error si no lo es.
+    """
+    if not nombre or nombre.strip() == "":
+        return "El nombre no puede estar vacío."
+    if nombre in (".", ".."):
+        return f"'{nombre}' es un nombre reservado."
+    if len(nombre) > MAX_NOMBRE:
+        return f"El nombre es demasiado largo (máximo {MAX_NOMBRE} caracteres)."
+    chars_encontrados = CHARS_INVALIDOS.intersection(set(nombre))
+    if chars_encontrados:
+        mostrar = " ".join(sorted(chars_encontrados))
+        return f"El nombre contiene caracteres inválidos: {mostrar}"
+    return None
+
+
 def tiene_permiso_escritura(registro: Dict[str, str]) -> bool:
     """
     Verifica si un registro tiene permiso de escritura.
@@ -240,8 +271,10 @@ def cmd_mkdir(nombre: str) -> None:
     """
     global GPWD
 
-    if nombre in ("", ".", "..", "/"):
-        print(f"{ROJO}Error:{RESET} nombre de directorio inválido.")
+    # FIX 2 & 3: validación centralizada de nombre.
+    error = validar_nombre(nombre)
+    if error:
+        print(f"{ROJO}Error:{RESET} {error}")
         return
 
     with lock:
@@ -281,8 +314,10 @@ def cmd_touch(nombre: str, padre_personalizado: Optional[int] = None, silencioso
 
     padre = GPWD if padre_personalizado is None else padre_personalizado
 
-    if nombre in ("", ".", "..", "/"):
-        print(f"{ROJO}Error:{RESET} nombre de archivo inválido.")
+    # FIX 2 & 3: validación centralizada de nombre.
+    error = validar_nombre(nombre)
+    if error:
+        print(f"{ROJO}Error:{RESET} {error}")
         return
 
     with lock:
@@ -430,7 +465,12 @@ def cmd_cd(destino: str) -> None:
     encontrado = buscar_en_directorio(registros, destino, GPWD)
 
     if encontrado is None or encontrado["tipo"] != "DIR":
-        print(f"{ROJO}Error:{RESET} directorio '{destino}' no encontrado.")
+        # Distinguir "no existe" de "existe pero es un archivo".
+        # es confuso si el archivo sí existe con ese nombre en el directorio.
+        if encontrado is not None and encontrado["tipo"] == "FILE":
+            print(f"{ROJO}Error:{RESET} '{destino}' es un archivo, no un directorio.")
+        else:
+            print(f"{ROJO}Error:{RESET} directorio '{destino}' no encontrado.")
         return
 
     GPWD = int(encontrado["id"])
@@ -483,6 +523,13 @@ def cmd_rm(nombre: str) -> None:
         if encontrado["tipo"] != "FILE":
             print(f"{ROJO}Error:{RESET} '{nombre}' es un directorio. Este rm solo elimina archivos.")
             return
+        """
+        este guard evita que GPWD quede apuntando a un ID que ya no existe en fat_db.txt,
+        lo que causaría que ls y otros comandos devuelvan resultados vacíos sin ningún mensaje de error.
+        """
+        if int(encontrado["id"]) == GPWD:
+            print(f"{ROJO}Error:{RESET} no se puede eliminar el directorio actual.")
+            return
 
         registros.remove(encontrado)
         escribir_registros(registros)
@@ -527,20 +574,31 @@ def cmd_tree(padre: Optional[int] = None, prefijo: str = "") -> None:
 
 
 def cmd_neofetch() -> None:
-    """
-    neofetch
-    Comando decorativo para que el programa se vea más personalizado.
-    """
     ruta = obtener_ruta_actual()
 
-    print(f"""{AMARILLO}
-        .-/+oossssoo+/-.          {VERDE}{USUARIO}@{HOST}{RESET}
-    `:+ssssssssssssssssss+:`      {GRIS}-------------------{RESET}
-  -+ssssssssssssssssssyyssss+-    OS: Thunder FAT Simulator
- .ossssssssssssssssssdMMMNysssso. Shell: Python Terminal
-/ssssssssssshdmmNNmmyNMMMMhssssss/ Directorio: {ruta}
-+ssssssssshmydMMMMMMMNddddysssssss+ DB: {DB_FILE}
-{RESET}""")
+    LOGO = [
+        " _____ ",
+        "|_   _|",
+        "  | |  ",
+        "  | |  ",
+        "  |_|  ",
+    ]
+
+    INFO = [
+        f"{VERDE}{USUARIO}@{HOST}{RESET}",
+        f"{GRIS}-------------------{RESET}",
+        f"{AZUL}OS{RESET}     Thunder FAT Simulator",
+        f"{AZUL}Shell{RESET}  Python Terminal",
+        f"{AZUL}Dir{RESET}    {ruta}",
+        f"{AZUL}DB{RESET}     {DB_FILE}",
+    ]
+
+    print()
+    for i in range(max(len(LOGO), len(INFO))):
+        lado_logo = LOGO[i] if i < len(LOGO) else " " * 7
+        lado_info = INFO[i] if i < len(INFO) else ""
+        print(f"  {AMARILLO}{lado_logo}{RESET}   {lado_info}")
+    print()
 
 
 def cmd_help() -> None:
@@ -656,7 +714,7 @@ def procesar_comando(entrada: str) -> bool:
         print(f"{ROJO}Error:{RESET} revisa las comillas del comando.")
         return True
 
-    comando = partes[0].lower()
+    comando = partes[0]
 
     if comando == "exit":
         print("Saliendo del simulador FAT...")
@@ -720,7 +778,11 @@ def procesar_comando(entrada: str) -> bool:
         if len(partes) == 1:
             cmd_test_hilos()
         elif len(partes) == 2 and partes[1].isdigit():
-            cmd_test_hilos(int(partes[1]))
+            cantidad = int(partes[1])
+            if cantidad < 1:
+                print(f"{ROJO}Error:{RESET} la cantidad debe ser al menos 1.")
+            else:
+                cmd_test_hilos(cantidad)
         else:
             print("Uso correcto: test_hilos  o  test_hilos <cantidad>")
 
